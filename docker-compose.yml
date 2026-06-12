@@ -1,0 +1,182 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Webhook Delivery System – docker-compose.yml
+#
+# Services start in this order (depends_on + health checks):
+#   redis  →  admin  →  subscriber* + dispatcher  →  producer
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── 1. Redis ────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ── 2. Admin API ─────────────────────────────────────────────────────────────
+  admin:
+    build: ./admin
+    container_name: admin
+    ports:
+      - "9002:8002"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── 3. Event Producer ─────────────────────────────────────────────────────
+  producer:
+    build: ./producer
+    container_name: producer
+    ports:
+      - "9001:8001"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ── 4. Subscriber Simulator – FAST profile (20 ms, 0% errors) ─────────────
+  subscriber:
+    build: ./subscriber
+    container_name: subscriber
+    ports:
+      - "9000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ADMIN_API_URL: "http://admin:8002"
+      SELF_URL: "http://subscriber:8000/webhook"
+      RESPONSE_LATENCY_MS: "20"
+      ERROR_RATE: "0.0"
+      TIMESTAMP_TOLERANCE_SECONDS: "300"
+    depends_on:
+      admin:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── 5. Subscriber Simulator – MEDIUM profile (200 ms, 5% errors) ──────────
+  subscriber-medium:
+    build: ./subscriber
+    container_name: subscriber-medium
+    ports:
+      - "9003:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ADMIN_API_URL: "http://admin:8002"
+      SELF_URL: "http://subscriber-medium:8000/webhook"
+      RESPONSE_LATENCY_MS: "200"
+      ERROR_RATE: "0.05"
+      TIMESTAMP_TOLERANCE_SECONDS: "300"
+    depends_on:
+      admin:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── 6. Subscriber Simulator – SLOW profile (500 ms, 15% errors) ───────────
+  subscriber-slow:
+    build: ./subscriber
+    container_name: subscriber-slow
+    ports:
+      - "9004:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ADMIN_API_URL: "http://admin:8002"
+      SELF_URL: "http://subscriber-slow:8000/webhook"
+      RESPONSE_LATENCY_MS: "500"
+      ERROR_RATE: "0.15"
+      TIMESTAMP_TOLERANCE_SECONDS: "300"
+    depends_on:
+      admin:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── 7. Dispatcher ─────────────────────────────────────────────────────────
+  dispatcher:
+    build: ./dispatcher
+    container_name: dispatcher
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # Change to: admission_control  or  load_shedding  to test other strategies
+      BACKPRESSURE_STRATEGY: "rate_limiting"
+      TOKEN_BUCKET_CAPACITY: "10"
+      TOKEN_REFILL_RATE: "2"
+      HIGH_WATER_MARK: "100"
+      LOW_WATER_MARK: "50"
+      SHEDDING_FAILURE_THRESHOLD: "3"
+      MAX_RETRIES: "3"
+    volumes:
+      # Share queue-depth log with the host so plot scripts can read it
+      - ./logs:/tmp/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import redis; r=redis.Redis(host='redis',port=6379); r.ping()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
